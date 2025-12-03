@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Drive Desk",
+  "description": "Quick controls for Google Drive documents from the toolbar popup.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "48": "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "windows",
+    "identity",
+    "identity.email"
+  ],
+  "oauth2": {
+    "client_id": "468668008288-8fqmnsj830q35nhn5im3b141mpictn4o.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile"
+    ]
+  },
+  "host_permissions": [
+    "https://drive.google.com/*",
+    "https://docs.google.com/*",
+    "https://profiles.google.com/*",
+    "https://www.googleapis.com/*"
+  ]
+}
+
