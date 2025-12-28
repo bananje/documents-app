@@ -27,9 +27,10 @@
     "identity.email"
   ],
   "oauth2": {
-    "client_id": "468668008288-8fqmnsj830q35nhn5im3b141mpictn4o.apps.googleusercontent.com",
+    "client_id": "YOUR_CLIENT_ID_HERE.apps.googleusercontent.com",
+    "client_secret": "YOUR_CLIENT_SECRET_HERE",
     "scopes": [
-      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      "https://www.googleapis.com/auth/drive",
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile"
     ]
@@ -38,7 +39,8 @@
     "https://drive.google.com/*",
     "https://docs.google.com/*",
     "https://profiles.google.com/*",
-    "https://www.googleapis.com/*"
+    "https://www.googleapis.com/*",
+    "https://people.googleapis.com/*"
   ]
 }
 

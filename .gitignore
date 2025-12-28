@@ -1,0 +1,3 @@
+# Ignore manifest.json to protect OAuth secrets
+manifest.json
+
