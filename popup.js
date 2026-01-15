@@ -2982,3 +2982,19 @@ loadTheme().then((theme) => {
   applyTheme(theme);
 });
 
+// Load version from manifest.json
+function updateVersion() {
+  try {
+    const manifest = chrome.runtime.getManifest();
+    const version = manifest.version;
+    const versionElement = document.querySelector(".footer__version");
+    if (versionElement && version) {
+      versionElement.textContent = `v${version}`;
+    }
+  } catch (error) {
+    console.error("Failed to load version:", error);
+  }
+}
+
+// Update version on startup
+updateVersion();
