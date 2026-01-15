@@ -1,29 +1,49 @@
-// Prefer client_id from manifest to avoid mismatches; fallback to the known value.
-const manifestClientId = (() => {
+// OAuth helper for Web Application OAuth
+// Uses chrome.identity.launchWebAuthFlow for Web Application OAuth clients
+
+// Get client credentials from manifest
+const getClientId = () => {
   try {
     const manifest = chrome?.runtime?.getManifest?.();
     return manifest?.oauth2?.client_id || null;
   } catch (e) {
     return null;
   }
-})();
+};
 
-// Prefer client_secret from manifest to avoid hardcoding secrets.
-const manifestClientSecret = (() => {
+const getClientSecret = () => {
   try {
     const manifest = chrome?.runtime?.getManifest?.();
     return manifest?.oauth2?.client_secret || null;
   } catch (e) {
     return null;
   }
-})();
+};
 
-// For Web Application OAuth client (uses secret). Keep fallback to prior client_id.
-const CLIENT_ID = manifestClientId;
-// Client secret is now read from manifest.json for security
-const CLIENT_SECRET = manifestClientSecret;
-const DEFAULT_SCOPES = [
-  "https://www.googleapis.com/auth/drive",
+const getScopes = () => {
+  try {
+    const manifest = chrome?.runtime?.getManifest?.();
+    return manifest?.oauth2?.scopes || [
+      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+    ];
+  } catch (e) {
+    return [
+      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+    ];
+  }
+};
+
+const CLIENT_ID = getClientId();
+const CLIENT_SECRET = getClientSecret();
+const DEFAULT_SCOPES = getScopes();
+
+// Basic scopes for initial sign-in (incremental authorization)
+// Drive scope will be requested later when needed
+export const BASIC_SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
 ];
@@ -127,9 +147,19 @@ export async function startGoogleOAuthFlow(options = {}) {
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("scope", scopes.join(" "));
-  authUrl.searchParams.set("access_type", "offline");
-  authUrl.searchParams.set("prompt", "consent");
-  authUrl.searchParams.set("include_granted_scopes", "true");
+  authUrl.searchParams.set("access_type", "offline"); // Important: get refresh token
+  
+  // Use prompt from options, default to "select_account" for incremental authorization
+  // "select_account" shows consent screen only if new permissions are needed
+  const prompt = options.prompt !== undefined ? options.prompt : "select_account";
+  authUrl.searchParams.set("prompt", prompt);
+  
+  // Support include_granted_scopes option, default to true
+  const includeGranted = options.includeGrantedScopes !== false;
+  if (includeGranted) {
+    authUrl.searchParams.set("include_granted_scopes", "true");
+  }
+  
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("code_challenge", codeChallenge);
   authUrl.searchParams.set("code_challenge_method", "S256");
@@ -165,7 +195,7 @@ export async function startGoogleOAuthFlow(options = {}) {
   const tokenResponse = await exchangeCodeForTokens({ code, codeVerifier, redirectUri });
   const accessToken = tokenResponse?.access_token;
   const refreshToken = tokenResponse?.refresh_token || "";
-  const expiresAt = Date.now() + (tokenResponse?.expires_in || 0) * 1000;
+  const expiresAt = Date.now() + (tokenResponse?.expires_in || 3600) * 1000;
 
   let idTokenPayload = null;
   if (tokenResponse?.id_token) {
@@ -223,11 +253,11 @@ export async function refreshGoogleAccessToken(refreshToken) {
 
   const data = await response.json();
   const accessToken = data?.access_token || "";
-  const expiresAt = Date.now() + (data?.expires_in || 0) * 1000;
+  const expiresAt = Date.now() + (data?.expires_in || 3600) * 1000;
 
   return {
     accessToken,
-    refreshToken: data?.refresh_token || refreshToken,
+    refreshToken: data?.refresh_token || refreshToken, // Google may return new refresh token
     expiresAt,
     expiresIn: data?.expires_in || null,
   };
@@ -274,3 +304,47 @@ export async function saveAccountsState(state) {
   });
 }
 
+/**
+ * Ensures required scopes are granted, using incremental authorization
+ * First tries non-interactive (prompt=none), then interactive if needed
+ * @param {string[]} requiredScopes - Array of required OAuth scopes
+ * @param {Object} options - Additional options (loginHint, etc.)
+ * @returns {Promise<Object|null>} Auth result or null if scopes already granted
+ */
+export async function ensureScopes(requiredScopes = [], options = {}) {
+  const scopes = Array.isArray(requiredScopes) ? requiredScopes.filter(Boolean) : [];
+  if (!scopes.length) return null;
+
+  // First try non-interactive (if permissions already granted, no screen will appear)
+  try {
+    return await startGoogleOAuthFlow({
+      scopes,
+      prompt: "none",
+      includeGrantedScopes: true,
+      ...options,
+    });
+  } catch (e) {
+    // Check if error is due to user cancellation
+    const errorMessage = e?.message || String(e);
+    const isUserCancellation = 
+      errorMessage.toLowerCase().includes("did not approve") ||
+      errorMessage.toLowerCase().includes("authorization was cancelled") ||
+      errorMessage.toLowerCase().includes("user cancelled") ||
+      errorMessage.toLowerCase().includes("access_denied");
+    
+    if (isUserCancellation) {
+      // User cancelled - don't try interactive flow
+      throw e;
+    }
+    
+    // If prompt=none didn't work (new permissions needed) - request interactively
+    // Use "select_account" - Google will show screen only for new permissions
+    // This happens in background - user only sees Google consent screen
+    return await startGoogleOAuthFlow({
+      scopes,
+      prompt: "select_account",
+      includeGrantedScopes: true,
+      ...options,
+    });
+  }
+}

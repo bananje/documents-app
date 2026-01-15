@@ -3,6 +3,8 @@ import {
   refreshGoogleAccessToken,
   loadAccountsState,
   saveAccountsState,
+  ensureScopes,
+  BASIC_SCOPES,
 } from "./oauth.js";
 
 class AuthRequiredError extends Error {
@@ -94,6 +96,21 @@ const GOOGLE_TYPES = [
   { key: "sheets", mime: "application/vnd.google-apps.spreadsheet" },
   { key: "slides", mime: "application/vnd.google-apps.presentation" },
   { key: "forms", mime: "application/vnd.google-apps.form" },
+];
+
+// All required scopes for initial sign-in (minimizes user clicks)
+// Request all permissions at once for new users (1 screen instead of 2)
+const ALL_REQUIRED_SCOPES = [
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+  "https://www.googleapis.com/auth/drive",
+];
+
+// Drive scopes for incremental authorization
+// These will be requested automatically when Drive API is accessed
+// (for existing users who only have basic scopes)
+const DRIVE_SCOPES = [
+  "https://www.googleapis.com/auth/drive",
 ];
 
 // Mapping document types to icon URLs (same as in CREATE_SHORTCUTS)
@@ -302,8 +319,6 @@ let accountProfiles = [];
 let activeAccountId = null;
 let accountMenuEl = null;
 let accountMenuOutsideHandler = null;
-// Counter for positioning up to 4 windows (2x2), without complex tracking
-let transientWindowIndex = 0;
 
 function getActiveAccountEmail() {
   const id = activeAccountId || accountStore.active_account_id || null;
@@ -338,89 +353,15 @@ function escapeHtml(str = "") {
 async function openDocumentInSideWindow(url) {
   try {
     const urlWithUser = appendAuthUserParam(url, getActiveAccountEmail());
-    if (chrome?.runtime?.sendMessage) {
-      // Use background script for more reliable window opening
-      const screenWidth = window.screen?.availWidth || window.innerWidth || 1920;
-      const screenHeight = window.screen?.availHeight || window.innerHeight || 1080;
-
-      const halfWidth = Math.floor(screenWidth / 2);
-      const halfHeight = Math.floor(screenHeight / 2);
-
-      const index = transientWindowIndex % 4;
-      transientWindowIndex += 1;
-
-      const positions = [
-        { left: 0, top: 0 }, // top left
-        { left: 0, top: halfHeight }, // bottom left
-        { left: halfWidth, top: halfHeight }, // bottom right
-        { left: halfWidth, top: 0 }, // top right
-      ];
-
-      const pos = positions[index];
-
-      chrome.runtime.sendMessage(
-        {
-          action: "openDriveWindow",
-          url: urlWithUser,
-          left: pos.left,
-          top: pos.top,
-          width: halfWidth,
-          height: halfHeight,
-        },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            console.error("Failed to send message to background:", chrome.runtime.lastError.message);
-            // Fallback: open directly
-            if (chrome?.windows?.create) {
-              chrome.windows.create({
-                url: urlWithUser,
-                type: "popup", // popup creates a window without address bar and some interface elements
-                left: pos.left,
-                top: pos.top,
-                width: halfWidth,
-                height: halfHeight,
-                focused: true,
-              });
-            }
-          }
-        },
-      );
-    } else if (chrome?.windows?.create) {
-      // Fallback: open directly from popup
-      const screenWidth = window.screen?.availWidth || window.innerWidth || 1920;
-      const screenHeight = window.screen?.availHeight || window.innerHeight || 1080;
-
-      const halfWidth = Math.floor(screenWidth / 2);
-      const halfHeight = Math.floor(screenHeight / 2);
-
-      const index = transientWindowIndex % 4;
-      transientWindowIndex += 1;
-
-      const positions = [
-        { left: 0, top: 0 },
-        { left: 0, top: halfHeight },
-        { left: halfWidth, top: halfHeight },
-        { left: halfWidth, top: 0 },
-      ];
-
-      const pos = positions[index];
-
-      chrome.windows.create({
-        url: urlWithUser,
-        type: "popup", // popup creates a window without address bar and some interface elements
-        left: pos.left,
-        top: pos.top,
-        width: halfWidth,
-        height: halfHeight,
-        focused: true,
-      });
+    if (chrome?.tabs?.create) {
+      chrome.tabs.create({ url: urlWithUser, active: false });
     } else {
       window.open(urlWithUser, "_blank", "noopener");
     }
   } catch (error) {
     console.error("Failed to open document in side window:", error);
     if (chrome?.tabs?.create) {
-      chrome.tabs.create({ url: appendAuthUserParam(url, getActiveAccountEmail()) });
+      chrome.tabs.create({ url: appendAuthUserParam(url, getActiveAccountEmail()), active: false });
     } else {
       window.open(appendAuthUserParam(url, getActiveAccountEmail()), "_blank", "noopener");
     }
@@ -851,7 +792,13 @@ function handleGrantAccess(view = activeView, searchQuery = null) {
   }
 
   // Call OAuth flow directly to open Google window
-  startGoogleOAuthFlow()
+  // Request all permissions at once for new users (minimizes clicks - 1 screen instead of 2)
+  // includeGrantedScopes ensures incremental authorization still works for existing users
+  startGoogleOAuthFlow({ 
+    scopes: ALL_REQUIRED_SCOPES,
+    prompt: "consent",
+    includeGrantedScopes: true 
+  })
     .then(async (authResult) => {
       if (!authResult?.userId || !authResult?.email || !authResult?.accessToken) {
         console.warn("OAuth flow did not return required fields", authResult);
@@ -1502,7 +1449,7 @@ async function deleteDriveFile(fileId, options = {}) {
   
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&supportsTeamDrives=true`;
   
-  const response = await executeApiRequestWithTokenRefresh(async (token) => {
+  const response = await executeDriveRequest(async (token) => {
     return await fetch(url, {
       method: "DELETE",
       headers: {
@@ -1560,15 +1507,37 @@ function toggleAccountAvatar(photoUrl) {
   
     // If photoUrl exists and is a valid URL — show avatar
     if (photoUrl && photoUrl.trim() !== "") {
-      if (avatarImg) {
-        avatarImg.src = photoUrl;
-        avatarImg.hidden = false;
-        avatarImg.removeAttribute("hidden");
-      }
-      // Completely hide fallback when avatar is present
+      // Keep fallback visible until the avatar is fully loaded
       if (avatarFallback) {
-        avatarFallback.hidden = true;
-        avatarFallback.setAttribute("hidden", "hidden");
+        avatarFallback.hidden = false;
+        avatarFallback.removeAttribute("hidden");
+      }
+      if (avatarImg) {
+        // Reset visibility while loading a fresh avatar
+        avatarImg.hidden = true;
+        avatarImg.setAttribute("hidden", "hidden");
+        avatarImg.removeAttribute("src");
+
+        avatarImg.onload = () => {
+          avatarImg.hidden = false;
+          avatarImg.removeAttribute("hidden");
+          if (avatarFallback) {
+            avatarFallback.hidden = true;
+            avatarFallback.setAttribute("hidden", "hidden");
+          }
+        };
+
+        avatarImg.onerror = () => {
+          avatarImg.hidden = true;
+          avatarImg.setAttribute("hidden", "hidden");
+          avatarImg.removeAttribute("src");
+          if (avatarFallback) {
+            avatarFallback.hidden = false;
+            avatarFallback.removeAttribute("hidden");
+          }
+        };
+
+        avatarImg.src = photoUrl;
       }
     } else {
       // No avatar — show fallback
@@ -1758,7 +1727,13 @@ function handleAccountSelect(accountId) {
 function startAddAccountFlow() {
   closeAccountMenu();
 
-  return startGoogleOAuthFlow()
+  // Request all permissions at once for new users (minimizes clicks - 1 screen instead of 2)
+  // includeGrantedScopes ensures incremental authorization still works for existing users
+  return startGoogleOAuthFlow({ 
+    scopes: ALL_REQUIRED_SCOPES,
+    prompt: "consent",
+    includeGrantedScopes: true 
+  })
     .then(async (authResult) => {
       if (!authResult?.userId || !authResult?.email || !authResult?.accessToken) {
         console.warn("OAuth flow did not return required fields", authResult);
@@ -2231,6 +2206,14 @@ async function getAuthToken(interactive = false, extraOptions = {}) {
   const storedAccount = accountId ? accountStore.accounts?.[accountId] : null;
   const now = Date.now();
 
+  // If forceNewSession, clear cached token
+  if (forceNewSession) {
+    cachedToken = null;
+    if (accountId) {
+      tokenCache.delete(accountId);
+    }
+  }
+
   // If there is a saved account with token
   if (!forcePrompt && storedAccount?.access_token) {
     const expiresAt = storedAccount.expires_at || 0;
@@ -2276,8 +2259,14 @@ async function getAuthToken(interactive = false, extraOptions = {}) {
   }
 
   // Interactive path: perform OAuth flow
+  // Request all permissions at once for new users (minimizes clicks - 1 screen instead of 2)
+  // includeGrantedScopes ensures incremental authorization still works for existing users
   try {
-    const authResult = await startGoogleOAuthFlow();
+    const authResult = await startGoogleOAuthFlow({ 
+      scopes: ALL_REQUIRED_SCOPES,
+      prompt: "consent",
+      includeGrantedScopes: true 
+    });
     if (!authResult?.accessToken || !authResult?.userId) {
       throw new AuthRequiredError("Authorization failed");
     }
@@ -2325,6 +2314,106 @@ function invalidateToken(token) {
     if (storedToken === token) {
       tokenCache.delete(accountId);
     }
+  }
+}
+
+/**
+ * Executes Drive API request with automatic scope request if needed
+ * Automatically requests Drive scopes incrementally if permission error occurs
+ * This happens in the background - user only sees Google consent screen if needed
+ * @param {Function} fetchFn - Function that executes request with token
+ * @param {boolean} interactive - Allow interactive authorization
+ * @returns {Promise<any>} - Request result
+ */
+async function executeDriveRequest(fetchFn, interactive = false) {
+  try {
+    const response = await executeApiRequestWithTokenRefresh(fetchFn, interactive);
+    
+    // Check if response indicates insufficient permissions
+    if (response.status === 403) {
+      const errorPayload = await response.clone().json().catch(() => null);
+      const reason = errorPayload?.error?.errors?.[0]?.reason;
+      if (reason === "insufficientPermissions" || reason === "insufficientFilePermissions") {
+        // Automatically request Drive scopes incrementally
+        const authResult = await ensureScopes(DRIVE_SCOPES, {
+          loginHint: getActiveAccountEmail() || undefined,
+        });
+
+        // Update account store with new token if auth result was returned
+        if (authResult?.userId && authResult?.accessToken) {
+          const existing = accountStore.accounts?.[authResult.userId] || {};
+          accountStore.accounts[authResult.userId] = {
+            email: authResult.email || existing.email || "",
+            access_token: authResult.accessToken,
+            refresh_token: authResult.refreshToken || existing.refresh_token || "",
+            expires_at: authResult.expiresAt || existing.expires_at || 0,
+            photoUrl: authResult.picture || existing.photoUrl || null,
+          };
+          
+          // Update active account if it matches
+          if (activeAccountId === authResult.userId || accountStore.active_account_id === authResult.userId) {
+            setActiveAccount(authResult.userId, authResult.accessToken);
+            if (authResult.email) {
+              signedInUser = { id: authResult.userId, email: authResult.email };
+            }
+          }
+          
+          await persistAccountStore();
+        }
+
+        // After getting permissions - retry request
+        return await executeApiRequestWithTokenRefresh(fetchFn, false);
+      }
+    }
+    
+    return response;
+  } catch (err) {
+    const message = err?.message || "";
+    const needsScope =
+      err instanceof AuthRequiredError ||
+      message.toLowerCase().includes("insufficientpermissions") ||
+      message.toLowerCase().includes("insufficientfilepermissions") ||
+      message.toLowerCase().includes("forbidden") ||
+      message.toLowerCase().includes("insufficient permissions") ||
+      message.toLowerCase().includes("re-authorize");
+
+    if (needsScope) {
+      // Automatically request Drive scopes incrementally (only Google consent screen will appear)
+      try {
+        const authResult = await ensureScopes(DRIVE_SCOPES, {
+          loginHint: getActiveAccountEmail() || undefined,
+        });
+
+        // Update account store with new token if auth result was returned
+        if (authResult?.userId && authResult?.accessToken) {
+          const existing = accountStore.accounts?.[authResult.userId] || {};
+          accountStore.accounts[authResult.userId] = {
+            email: authResult.email || existing.email || "",
+            access_token: authResult.accessToken,
+            refresh_token: authResult.refreshToken || existing.refresh_token || "",
+            expires_at: authResult.expiresAt || existing.expires_at || 0,
+            photoUrl: authResult.picture || existing.photoUrl || null,
+          };
+          
+          // Update active account if it matches
+          if (activeAccountId === authResult.userId || accountStore.active_account_id === authResult.userId) {
+            setActiveAccount(authResult.userId, authResult.accessToken);
+            if (authResult.email) {
+              signedInUser = { id: authResult.userId, email: authResult.email };
+            }
+          }
+          
+          await persistAccountStore();
+        }
+
+        // After getting permissions - retry request
+        return await executeApiRequestWithTokenRefresh(fetchFn, false);
+      } catch (scopeError) {
+        // If scope request failed, throw original error
+        throw err;
+      }
+    }
+    throw err;
   }
 }
 
@@ -2509,7 +2598,6 @@ async function searchDriveFiles(searchQuery, { interactive = false } = {}) {
     return [];
   }
 
-  const token = await getAuthToken(interactive);
   // Escape special characters in search query
   const escapedQuery = searchQuery.replace(/['"]/g, "\\$&");
   
@@ -2527,23 +2615,19 @@ async function searchDriveFiles(searchQuery, { interactive = false } = {}) {
     corpora: "user",
   });
 
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (response.status === 401) {
-    invalidateToken(token);
-    throw new AuthRequiredError("Session expired, please re-authorize.");
-  }
+  const response = await executeDriveRequest(async (token) => {
+    return await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  }, interactive);
 
   if (!response.ok) {
     const errorPayload = await response.json().catch(() => null);
     const message = errorPayload?.error?.message;
     const reason = errorPayload?.error?.errors?.[0]?.reason;
     if (response.status === 403 && reason === "insufficientPermissions") {
-      invalidateToken(token);
       throw new AuthRequiredError("You need to re-authorize to search files.");
     }
     throw new Error(`Drive API search error: ${message || response.statusText}`);
@@ -2581,7 +2665,7 @@ async function fetchDriveFiles(view, { interactive = false, pageToken = null, ty
 
   const url = `https://www.googleapis.com/drive/v3/files?${params.toString()}`;
   
-  const response = await executeApiRequestWithTokenRefresh(async (token) => {
+  const response = await executeDriveRequest(async (token) => {
     return await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
