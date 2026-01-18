@@ -24,13 +24,13 @@ const getScopes = () => {
   try {
     const manifest = chrome?.runtime?.getManifest?.();
     return manifest?.oauth2?.scopes || [
-      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/drive.file",
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile",
     ];
   } catch (e) {
     return [
-      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/drive.file",
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile",
     ];

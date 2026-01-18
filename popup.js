@@ -1518,6 +1518,10 @@ function toggleAccountAvatar(photoUrl) {
         avatarImg.setAttribute("hidden", "hidden");
         avatarImg.removeAttribute("src");
 
+        // Clear previous handlers to avoid multiple calls
+        avatarImg.onload = null;
+        avatarImg.onerror = null;
+
         avatarImg.onload = () => {
           avatarImg.hidden = false;
           avatarImg.removeAttribute("hidden");
@@ -1528,6 +1532,7 @@ function toggleAccountAvatar(photoUrl) {
         };
 
         avatarImg.onerror = () => {
+          // Image failed to load - show fallback SVG icon
           avatarImg.hidden = true;
           avatarImg.setAttribute("hidden", "hidden");
           avatarImg.removeAttribute("src");
@@ -1540,27 +1545,18 @@ function toggleAccountAvatar(photoUrl) {
         avatarImg.src = photoUrl;
       }
     } else {
-      // No avatar — show fallback
+      // No avatar URL provided — show fallback SVG icon
       if (avatarImg) {
         avatarImg.hidden = true;
         avatarImg.setAttribute("hidden", "hidden");
         avatarImg.removeAttribute("src");
+        // Clear handlers
+        avatarImg.onload = null;
+        avatarImg.onerror = null;
       }
       if (avatarFallback) {
         avatarFallback.hidden = false;
         avatarFallback.removeAttribute("hidden");
-      }
-  
-      // Show SVG profile icon as fallback
-      // If email exists, we could show initials, but we keep the icon
-      if (signedInUser?.email) {
-        const initials = signedInUser.email
-          .split("@")[0]
-          .split(/[.\-_]/)
-          .map(part => part[0]?.toUpperCase() || "")
-          .join("");
-        // Could add initials text, but SVG is already displayed
-        // avatarFallback.textContent = initials || ""; 
       }
     }
   }
@@ -1921,12 +1917,10 @@ function initIdentity() {
           toggleAuthUI(true);
           fetchUserAvatar({ size: 64, interactive: false })
             .then((photoUrl) => {
-              if (photoUrl) {
-                toggleAccountAvatar(photoUrl);
-              }
+              toggleAccountAvatar(photoUrl || null);
             })
             .catch((error) => {
-              console.warn("Failed to fetch avatar for stored account", error);
+              toggleAccountAvatar(null);
             })
             .finally(resolve);
           hideAuthPrompt();
@@ -2023,12 +2017,11 @@ function initIdentity() {
         toggleAuthUI(true);
         fetchUserAvatar({ size: 64, interactive: false })
           .then((photoUrl) => {
-            if (photoUrl) {
-              toggleAccountAvatar(photoUrl);
-            }
+            toggleAccountAvatar(photoUrl || null);
           })
           .catch((error) => {
             console.warn("Failed to fetch avatar for stored account (no sync)", error);
+            toggleAccountAvatar(null);
           })
           .finally(resolve);
         hideAuthPrompt();
